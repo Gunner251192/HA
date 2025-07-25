@@ -1,0 +1,189 @@
+---
+esphome:
+  name: esp-veml7700
+  comment: "ESP-04 in Eetkamer"
+  area: "Eetkamer"
+  
+  friendly_name: esp-veml7700
+  min_version: 2025.7.3
+  name_add_mac_suffix: true
+  project:
+    name: esp-veml7700
+    version: "2025.7.3"
+
+globals:
+  - id: last_category
+    type: int
+    restore_value: no
+    initial_value: '0'  # 0=Evening dim, 1=Twilight, 2=Normal, 3=Bright
+
+substitutions:
+  esp_name: esp_04
+
+esp8266:
+  board: d1_mini
+
+logger:
+api:
+ota:
+wifi:
+web_server:
+captive_portal:
+
+# Enable I2C bus on D1/D2
+i2c:
+  sda: D2
+  scl: D1
+  scan: true    # optional: scans for devices on boot
+
+sensor:
+  - platform: veml7700
+    address: 0x10
+    update_interval: 10s
+    ambient_light:
+      name: "${esp_name} VEML7700 Ambient_Light"
+      id: ambient_lux
+      filters:
+        - sliding_window_moving_average:
+            window_size: 5
+            send_every: 1
+    actual_gain:
+      name: "${esp_name} VEML7700 Gain"
+      id: veml_gain
+      filters:
+        - sliding_window_moving_average:
+            window_size: 5
+            send_every: 1
+    actual_integration_time:
+      name: "${esp_name} VEML7700 Actual Integration Time"
+    glass_attenuation_factor: 1.0
+    #glass_attenuation_factor: 1.1 // with plexiglass
+    lux_compensation: true
+  - platform: wifi_signal
+    name: "${esp_name} WiFi Signal"
+    update_interval: 120s
+
+switch:
+  - platform: restart
+    name: "${esp_name} Restart"
+
+text_sensor:
+  - platform: uptime
+    name: "${esp_name} Uptime"
+    format:
+      separator: " "
+      days: "D"
+  - platform: version
+    name: "${esp_name} ESPHome Version"
+  - platform: wifi_info
+    ssid:
+      name: "${esp_name} SSID"
+  - platform: template
+    name: "${esp_name} Light Category"
+    icon: "mdi:theme-light-dark"
+    update_interval: 30s
+    lambda: |-
+      const float lux = id(ambient_lux).state;
+      int cat = id(last_category);
+
+      // Hysteresis logic
+      if (lux > 600) {
+        cat = 3; // Bright
+      } else if (lux > 180 && cat <= 2) {
+        cat = 2; // Normal
+      } else if (lux > 70 && cat <= 1) {
+        cat = 1; // Twilight
+      } else if (lux < 40) {
+        cat = 0; // Evening dim
+      }
+
+      id(last_category) = cat;
+
+      if (cat == 3) return {"Bright daylight"};
+      if (cat == 2) return {"Normal indoor lighting"};
+      if (cat == 1) return {"Twilight"};
+      return {"Evening dim"};
+  - platform: template
+    name: "${esp_name} Gain State"
+    lambda: |-
+      if (id(veml_gain).has_state()) {
+        float g = id(veml_gain).state;
+        if (g > 3.5) return {"High (4x)"};
+        else if (g > 1.5) return {"Medium (2x)"};
+        else if (g > 0.5) return {"Normal (1x)"};
+        else return {"Low (1/8x)"};
+      } else {
+        return {"Unknown"};
+      }
+  - platform: template
+    name: "${esp_name} Lighting Scene Suggestion"
+    lambda: |-
+      if (id(ambient_lux).has_state()) {
+        float lux = id(ambient_lux).state;
+        if (lux > 300.0) {
+          return {"No Lights Needed"};
+        } else if (lux > 50.0) {
+          return {"Work Light"};
+        } else if (lux > 10.0) {
+          return {"Relax Light"};
+        } else {
+          return {"Night Light"};
+        }
+      } else {
+        return {"Unknown"};
+      }
+  - platform: template
+    name: "Sensor Status"
+    lambda: |-
+      if (id(ambient_lux).has_state()) {
+        if (id(ambient_lux).state < 0) {
+          return {"Error"};
+        } else {
+          return {"OK"};
+        }
+      } else {
+        return {"No Data"};
+      }
+
+  - platform: template
+    name: "${esp_name} Lighting Condition"
+    lambda: |-
+      static int last_state = -1;  // 0=Evening,1=Twilight,2=Normal,3=Bright
+      if (!id(ambient_lux).has_state()) {
+        return {"Unknown"};
+      }
+      float lux = id(ambient_lux).state;
+
+      // Hysteresis thresholds:
+      // When going brighter, use upper thresholds.
+      // When going darker, use slightly lower thresholds.
+
+      if (last_state == -1) {
+        // initialize on first run
+        if (lux > 300) last_state = 3;
+        else if (lux > 50) last_state = 2;
+        else if (lux > 10) last_state = 1;
+        else last_state = 0;
+      } else {
+        switch (last_state) {
+          case 3: // currently Bright
+            if (lux < 250) last_state = 2; // drop to Normal
+            break;
+          case 2: // currently Normal
+            if (lux > 350) last_state = 3; // go to Bright
+            else if (lux < 40) last_state = 1; // go to Twilight
+            break;
+          case 1: // currently Twilight
+            if (lux > 60) last_state = 2; // go to Normal
+            else if (lux < 5) last_state = 0; // go to Evening
+            break;
+          case 0: // currently Evening
+            if (lux > 15) last_state = 1; // go to Twilight
+            break;
+        }
+      }
+
+      if (last_state == 3) return {"Bright Daylight"};
+      else if (last_state == 2) return {"Normal Indoor"};
+      else if (last_state == 1) return {"Twilight"};
+      else return {"Evening/Dark"};
